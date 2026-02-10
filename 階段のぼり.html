@@ -1,0 +1,567 @@
+<!DOCTYPE html>  
+<html lang="ja">  
+<head>  
+    <meta charset="UTF-8">  
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">  
+    <title>Infinite Stairs - Space Journey</title>  
+    <script src="https://cdn.tailwindcss.com"></script>  
+    <style>  
+        body {  
+            margin: 0;  
+            overflow: hidden;  
+            background: #87CEEB; /* 初期背景色：優しい空色 */  
+            font-family: 'Helvetica Neue', Arial, sans-serif;  
+            touch-action: none;  
+            transition: background 1.2s ease; /* 色の変化をより滑らかに */  
+        }  
+        #game-container {  
+            position: relative;  
+            width: 100vw;  
+            height: 100vh;  
+            display: flex;  
+            justify-content: center;  
+            align-items: center;  
+        }  
+        canvas {  
+            display: block;  
+        }  
+        #ui-overlay {  
+            position: absolute;  
+            top: 40px;  
+            text-align: center;  
+            width: 100%;  
+            pointer-events: none;  
+            user-select: none;  
+            z-index: 5;  
+        }  
+        #score-display {  
+            font-size: 64px;  
+            font-weight: bold;  
+            color: white;  
+            text-shadow: 3px 3px 6px rgba(0,0,0,0.2);  
+        }  
+        .screen {  
+            position: absolute;  
+            top: 0;  
+            left: 0;  
+            width: 100%;  
+            height: 100%;  
+            display: flex;  
+            flex-direction: column;  
+            justify-content: center;  
+            align-items: center;  
+            background: rgba(0,0,0,0.6);  
+            color: white;  
+            z-index: 20;  
+            backdrop-filter: blur(4px);  
+            cursor: pointer;  
+        }  
+        .btn-start {  
+            padding: 20px 60px;  
+            font-size: 28px;  
+            background: #ff4757;  
+            color: white;  
+            border: none;  
+            border-radius: 50px;  
+            box-shadow: 0 4px 15px rgba(255, 71, 87, 0.4);  
+            margin-top: 20px;  
+        }  
+        .hidden {  
+            display: none !important;  
+        }  
+        .retry-text {  
+            animation: pulse 1.5s infinite;  
+        }  
+        @keyframes pulse {  
+            0%, 100% { opacity: 1; transform: scale(1); }  
+            50% { opacity: 0.7; transform: scale(1.05); }  
+        }  
+    </style>  
+</head>  
+<body>  
+  
+<div id="game-container">  
+    <canvas id="gameCanvas"></canvas>  
+      
+    <div id="ui-overlay">  
+        <div id="score-display">0</div>  
+    </div>  
+  
+    <!-- スタート画面 -->  
+    <div id="start-screen" class="screen">  
+        <h1 class="text-6xl font-extrabold mb-4 tracking-tight">階段のぼり</h1>  
+        <p class="text-xl mb-2 text-yellow-300 font-bold">SPEED RUN</p>  
+        <p class="text-lg mb-8 text-white opacity-90">急いでのぼれ！波が迫ってくる！</p>  
+        <div class="btn-start">画面をタップ</div>  
+    </div>  
+  
+    <!-- ゲームオーバー画面 -->  
+    <div id="game-over-screen" class="screen hidden">  
+        <h1 class="text-5xl font-bold mb-4">FINISH</h1>  
+        <div id="game-over-reason" class="text-xl mb-2 text-red-300 font-bold"></div>  
+        <div id="final-score" class="text-3xl mb-8">Score: 0</div>  
+        <p class="text-xl retry-text">タップしてリトライ</p>  
+    </div>  
+</div>  
+  
+<script>  
+    const canvas = document.getElementById('gameCanvas');  
+    const ctx = canvas.getContext('2d');  
+    const scoreDisplay = document.getElementById('score-display');  
+    const startScreen = document.getElementById('start-screen');  
+    const gameOverScreen = document.getElementById('game-over-screen');  
+    const finalScoreDisplay = document.getElementById('final-score');  
+    const gameOverReason = document.getElementById('game-over-reason');  
+  
+    const STAIR_WIDTH = 70;  
+    const STAIR_HEIGHT = 20;  
+    const STAIR_DEPTH = 6;  
+    const STEP_X = 50;  
+    const STEP_Y = 50;  
+    const PLAYER_SIZE = 35;  
+  
+    let score = 0;  
+    let gameActive = false;  
+    let isFalling = false;  
+    let hasSplashed = false; // 落水音が鳴ったかどうかのフラグ  
+    let stairs = [];  
+    let particles = [];  
+    let starFields = [];  
+    let player = {   
+        x: 0, y: 0,   
+        targetX: 0, targetY: 0,   
+        vx: 0, vy: 0,   
+        angle: 0,  
+        currentStairIndex: 0   
+    };  
+    let cameraY = 0;  
+    let cameraX = 0;  
+      
+    let dangerY = 0;  
+    let baseDangerSpeed = 5.0;  
+    let dangerSpeed = baseDangerSpeed;  
+    let waveOffset = 0;  
+    let chaseStarted = false;  
+  
+    // --- オーディオシステム (Web Audio API) ---  
+    let audioCtx = null;  
+  
+    function initAudio() {  
+        if (!audioCtx) {  
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();  
+        }  
+        if (audioCtx.state === 'suspended') {  
+            audioCtx.resume();  
+        }  
+    }  
+  
+    function playSound(type, direction = 0) {  
+        if (!audioCtx) return;  
+          
+        const now = audioCtx.currentTime;  
+  
+        if (type === 'step') {  
+            const osc = audioCtx.createOscillator();  
+            const gain = audioCtx.createGain();  
+            osc.connect(gain);  
+            gain.connect(audioCtx.destination);  
+              
+            // 左右で音程を変える（左: 低め、右: 高め）  
+            const freq = direction === -1 ? 330 : 440; // ミ(E4) と ラ(A4)  
+            osc.type = 'triangle';  
+            osc.frequency.setValueAtTime(freq, now);  
+            gain.gain.setValueAtTime(0.1, now);  
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);  
+            osc.start(now);  
+            osc.stop(now + 0.1);  
+        } else if (type === 'jump') {  
+            // 落下の瞬間のジャンプ音  
+            const osc = audioCtx.createOscillator();  
+            const gain = audioCtx.createGain();  
+            osc.connect(gain);  
+            gain.connect(audioCtx.destination);  
+            osc.type = 'sine';  
+            osc.frequency.setValueAtTime(400, now);  
+            osc.frequency.exponentialRampToValueAtTime(800, now + 0.15);  
+            gain.gain.setValueAtTime(0.1, now);  
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.15);  
+            osc.start(now);  
+            osc.stop(now + 0.15);  
+        } else if (type === 'splash') {  
+            // 「ジャポン」という落水音  
+            const osc = audioCtx.createOscillator();  
+            const gain = audioCtx.createGain();  
+            osc.connect(gain);  
+            gain.connect(audioCtx.destination);  
+            osc.type = 'sine';  
+            osc.frequency.setValueAtTime(150, now);  
+            osc.frequency.exponentialRampToValueAtTime(40, now + 0.3);  
+            gain.gain.setValueAtTime(0.2, now);  
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.3);  
+            osc.start(now);  
+            osc.stop(now + 0.3);  
+              
+            // ノイズを混ぜて水しぶき感を出す  
+            const noise = audioCtx.createOscillator();  
+            const nGain = audioCtx.createGain();  
+            noise.type = 'square'; // 簡易的なノイズ代用  
+            noise.frequency.setValueAtTime(100, now);  
+            nGain.gain.setValueAtTime(0.05, now);  
+            nGain.gain.linearRampToValueAtTime(0, now + 0.2);  
+            noise.connect(nGain);  
+            nGain.connect(audioCtx.destination);  
+            noise.start(now);  
+            noise.stop(now + 0.2);  
+        } else if (type === 'shh') {  
+            // 「ジュッ」という短い消滅音  
+            const osc = audioCtx.createOscillator();  
+            const gain = audioCtx.createGain();  
+            osc.connect(gain);  
+            gain.connect(audioCtx.destination);  
+            osc.type = 'sawtooth';  
+            osc.frequency.setValueAtTime(1000, now);  
+            osc.frequency.exponentialRampToValueAtTime(2000, now + 0.05);  
+            gain.gain.setValueAtTime(0.08, now);  
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.05);  
+            osc.start(now);  
+            osc.stop(now + 0.05);  
+        }  
+    }  
+  
+    function initCanvas() {  
+        canvas.width = window.innerWidth;  
+        canvas.height = window.innerHeight;  
+    }  
+  
+    window.addEventListener('resize', initCanvas);  
+    initCanvas();  
+  
+    function updateBackground() {  
+        let r, g, b;  
+        if (score < 50) {  
+            const t = score / 50;  
+            r = 135 - (135 - 70) * t;  
+            g = 206 - (206 - 130) * t;  
+            b = 235 - (235 - 180) * t;  
+        } else if (score < 100) {  
+            const t = (score - 50) / 50;  
+            r = 70 - (70 - 40) * t;  
+            g = 130 - (130 - 60) * t;  
+            b = 180 - (180 - 100) * t;  
+        } else if (score < 150) {  
+            const t = (score - 100) / 50;  
+            r = 40 - (40 - 20) * t;  
+            g = 60 - (60 - 25) * t;  
+            b = 100 - (100 - 45) * t;  
+        } else {  
+            r = 15; g = 15; b = 30;  
+        }  
+        document.body.style.backgroundColor = `rgb(${Math.floor(r)}, ${Math.floor(g)}, ${Math.floor(b)})`;  
+    }  
+  
+    function initStars() {  
+        starFields = [];  
+        for (let i = 0; i < 100; i++) {  
+            starFields.push({  
+                x: Math.random() * canvas.width * 2 - canvas.width,  
+                y: Math.random() * -6000,   
+                size: Math.random() * 1.5 + 0.5,  
+                opacity: Math.random()  
+            });  
+        }  
+    }  
+  
+    function startGame() {  
+        initAudio();   
+        score = 0;  
+        scoreDisplay.innerText = score;  
+        updateBackground();  
+        initStars();  
+        gameActive = true;  
+        isFalling = false;  
+        hasSplashed = false;  
+        chaseStarted = false;   
+        particles = [];  
+          
+        startScreen.classList.add('hidden');  
+        gameOverScreen.classList.add('hidden');  
+          
+        stairs = [{ x: canvas.width / 2, y: canvas.height - 150, broken: false }];  
+        for (let i = 0; i < 20; i++) {  
+            generateStair();  
+        }  
+  
+        player.currentStairIndex = 0;  
+        player.x = stairs[0].x;  
+        player.y = stairs[0].y - PLAYER_SIZE;  
+        player.targetX = player.x;  
+        player.targetY = player.y;  
+        player.vx = 0;  
+        player.vy = 0;  
+        player.angle = 0;  
+          
+        cameraX = player.x - canvas.width / 2;  
+        cameraY = player.y - canvas.height + 250;  
+          
+        dangerY = stairs[0].y + 200;   
+        dangerSpeed = baseDangerSpeed;  
+  
+        requestAnimationFrame(update);  
+    }  
+  
+    function handleGlobalInput(e) {  
+        if (!gameActive) {  
+            startGame();  
+            return;  
+        }  
+          
+        if (isFalling) return;  
+  
+        const touchX = (e.clientX !== undefined) ? e.clientX : (e.touches ? e.touches[0].clientX : 0);  
+        const inputDir = touchX < window.innerWidth / 2 ? -1 : 1;  
+  
+        const nextStair = stairs[player.currentStairIndex + 1];  
+        if (!nextStair) return;  
+        const actualDir = (nextStair.x > stairs[player.currentStairIndex].x) ? 1 : -1;  
+  
+        if (inputDir === actualDir) {  
+            if (!chaseStarted) chaseStarted = true;  
+  
+            const currentStair = stairs[player.currentStairIndex];  
+            currentStair.broken = true;  
+            createStairParticles(currentStair);  
+  
+            player.currentStairIndex++;  
+            score++;  
+            scoreDisplay.innerText = score;  
+            updateBackground();  
+              
+            // 左右で音程が違う音を再生  
+            playSound('step', inputDir);  
+              
+            player.targetX = nextStair.x;  
+            player.targetY = nextStair.y - PLAYER_SIZE;  
+  
+            if (stairs.length - player.currentStairIndex < 15) {  
+                generateStair();  
+            }  
+        } else {  
+            playSound('jump'); // 飛んだ音  
+            startFalling(inputDir, "踏みはずした！");  
+        }  
+    }  
+  
+    window.addEventListener('mousedown', handleGlobalInput);  
+    window.addEventListener('touchstart', (e) => {  
+        handleGlobalInput(e);  
+        if (gameActive) e.preventDefault();  
+    }, { passive: false });  
+  
+    function generateStair() {  
+        const lastStair = stairs[stairs.length - 1];  
+        let dir = Math.random() > 0.5 ? 1 : -1;  
+        if (lastStair.x < 100) dir = 1;  
+        if (lastStair.x > canvas.width - 100) dir = -1;  
+  
+        stairs.push({  
+            x: lastStair.x + (dir * STEP_X),  
+            y: lastStair.y - STEP_Y,  
+            direction: dir,  
+            broken: false  
+        });  
+    }  
+  
+    function createStairParticles(stair) {  
+        const numParticles = 6;  
+        const color = stairs.indexOf(stair) % 2 === 0 ? '#ffffff' : '#e2e8f0';  
+        for (let i = 0; i < numParticles; i++) {  
+            particles.push({  
+                x: stair.x - STAIR_WIDTH/2 + Math.random() * STAIR_WIDTH,  
+                y: stair.y + Math.random() * STAIR_HEIGHT,  
+                vx: (Math.random() - 0.5) * 3,  
+                vy: Math.random() * 2,  
+                size: 4 + Math.random() * 6,  
+                life: 1.0,  
+                color: color  
+            });  
+        }  
+    }  
+  
+    function startFalling(inputDir, reason) {  
+        if (isFalling) return;  
+        isFalling = true;  
+        player.vx = inputDir === 0 ? 0 : inputDir * 5;  
+        player.vy = -5;  
+        gameOverReason.innerText = reason;  
+    }  
+  
+    function showGameOver() {  
+        gameActive = false;  
+        finalScoreDisplay.innerText = `スコア: ${score}`;  
+        gameOverScreen.classList.remove('hidden');  
+    }  
+  
+    function update() {  
+        if (!gameActive) return;  
+  
+        if (!isFalling) {  
+            if (chaseStarted) {  
+                dangerSpeed = baseDangerSpeed + (score / 50);   
+                dangerY -= dangerSpeed;  
+            }  
+              
+            waveOffset += 0.12;  
+              
+            const maxDistance = 500;  
+            if (dangerY > player.y + maxDistance) {  
+                dangerY = player.y + maxDistance;  
+            }  
+  
+            // 波に飲まれる判定  
+            if (dangerY - 15 < player.y + PLAYER_SIZE / 2) {  
+                playSound('shh'); // 「ジュッ」という音  
+                startFalling(0, "波にのまれた！");  
+            }  
+  
+            player.x += (player.targetX - player.x) * 0.25;  
+            player.y += (player.targetY - player.y) * 0.25;  
+  
+            const targetCamX = player.x - canvas.width / 2;  
+            const targetCamY = player.y - canvas.height + 350;  
+            cameraX += (targetCamX - cameraX) * 0.1;  
+            cameraY += (targetCamY - cameraY) * 0.1;  
+        } else {  
+            player.vy += 0.8;  
+            player.x += player.vx;  
+            player.y += player.vy;  
+            player.angle += 0.2 * (player.vx >= 0 ? 1 : -1);  
+  
+            // 波に触れた瞬間の「ジャポン」  
+            if (!hasSplashed && player.y > dangerY) {  
+                playSound('splash');  
+                hasSplashed = true;  
+            }  
+  
+            if (player.y > cameraY + canvas.height + 100) {  
+                showGameOver();  
+            }  
+        }  
+  
+        for (let i = particles.length - 1; i >= 0; i--) {  
+            const p = particles[i];  
+            p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.life -= 0.03;  
+            if (p.life <= 0) particles.splice(i, 1);  
+        }  
+  
+        draw();  
+        requestAnimationFrame(update);  
+    }  
+  
+    function draw() {  
+        ctx.clearRect(0, 0, canvas.width, canvas.height);  
+        ctx.save();  
+        ctx.translate(-cameraX, -cameraY);  
+  
+        if (score > 30) {  
+            const starAlpha = Math.min(0.8, (score - 30) / 70);  
+            ctx.fillStyle = `rgba(255, 255, 255, ${starAlpha})`;  
+            starFields.forEach(star => {  
+                ctx.beginPath();  
+                ctx.arc(star.x + (cameraX * 0.3), star.y, star.size, 0, Math.PI * 2);  
+                ctx.fill();  
+            });  
+        }  
+  
+        particles.forEach(p => {  
+            ctx.globalAlpha = Math.max(0, p.life);  
+            ctx.fillStyle = p.color;  
+            ctx.fillRect(p.x, p.y, p.size, p.size);  
+        });  
+        ctx.globalAlpha = 1.0;  
+  
+        stairs.forEach((stair, index) => {  
+            if (stair.broken) return;  
+            const dist = player.currentStairIndex - index;  
+            if (dist > 5 || index - player.currentStairIndex > 25) return;  
+              
+            const isEven = index % 2 === 0;  
+            const mainColor = isEven ? '#ffffff' : '#e2e8f0';  
+            const shadowColor = isEven ? '#d1d5db' : '#cbd5e1';  
+  
+            ctx.fillStyle = shadowColor;  
+            ctx.beginPath();  
+            ctx.roundRect(stair.x - STAIR_WIDTH/2, stair.y + STAIR_DEPTH, STAIR_WIDTH, STAIR_HEIGHT, 6);  
+            ctx.fill();  
+  
+            ctx.fillStyle = mainColor;  
+            ctx.beginPath();  
+            ctx.roundRect(stair.x - STAIR_WIDTH/2, stair.y, STAIR_WIDTH, STAIR_HEIGHT, 6);  
+            ctx.fill();  
+        });  
+  
+        if (!isFalling) {  
+            ctx.fillStyle = 'rgba(0,0,0,0.1)';  
+            ctx.beginPath();  
+            ctx.ellipse(player.x, player.targetY + PLAYER_SIZE + 10, 15, 5, 0, 0, Math.PI * 2);  
+            ctx.fill();  
+        }  
+  
+        ctx.fillStyle = '#ff5252';  
+        ctx.beginPath();  
+        ctx.moveTo(cameraX, dangerY + 2000);   
+        ctx.lineTo(cameraX, dangerY);         
+        for (let x = cameraX; x <= cameraX + canvas.width; x += 15) {  
+            const waveY = dangerY + Math.sin((x / 50) + waveOffset) * 12;  
+            ctx.lineTo(x, waveY);  
+        }  
+        ctx.lineTo(cameraX + canvas.width, dangerY + 2000);   
+        ctx.closePath();  
+        ctx.fill();  
+          
+        ctx.strokeStyle = '#ff867f';  
+        ctx.lineWidth = 3;  
+        ctx.beginPath();  
+        for (let x = cameraX; x <= cameraX + canvas.width; x += 15) {  
+            const waveY = dangerY + Math.sin((x / 50) + waveOffset) * 12;  
+            if (x === cameraX) ctx.moveTo(x, waveY);  
+            else ctx.lineTo(x, waveY);  
+        }  
+        ctx.stroke();  
+  
+        ctx.save();  
+        ctx.translate(player.x, player.y - 5);  
+        ctx.rotate(player.angle);  
+        ctx.fillStyle = '#ff4757';  
+        ctx.beginPath(); ctx.arc(0, 0, PLAYER_SIZE / 2, 0, Math.PI * 2); ctx.fill();  
+          
+        ctx.fillStyle = 'white';  
+        let moveDiff = isFalling ? player.vx : (player.targetX - player.x);  
+        const eyeOffset = moveDiff > 1 ? 6 : moveDiff < -1 ? -6 : 0;  
+          
+        if (isFalling) {  
+            ctx.strokeStyle = 'white'; ctx.lineWidth = 2;  
+            ctx.beginPath(); ctx.moveTo(eyeOffset-5, -11); ctx.lineTo(eyeOffset-1, -7); ctx.moveTo(eyeOffset-1, -11); ctx.lineTo(eyeOffset-5, -7); ctx.stroke();  
+            ctx.beginPath(); ctx.moveTo(eyeOffset+1, -11); ctx.lineTo(eyeOffset+5, -7); ctx.moveTo(eyeOffset+5, -11); ctx.lineTo(eyeOffset+1, -7); ctx.stroke();  
+        } else {  
+            ctx.beginPath(); ctx.arc(eyeOffset, -3, 5, 0, Math.PI * 2); ctx.fill();  
+            ctx.fillStyle = '#2f3542';  
+            ctx.beginPath(); ctx.arc(eyeOffset + (eyeOffset > 0 ? 2 : -2), -3, 2, 0, Math.PI * 2); ctx.fill();  
+        }  
+        ctx.restore();  
+  
+        ctx.restore();  
+    }  
+  
+    if (!CanvasRenderingContext2D.prototype.roundRect) {  
+        CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {  
+            if (w < 2 * r) r = w / 2; if (h < 2 * r) r = h / 2;  
+            this.moveTo(x + r, y); this.arcTo(x + w, y, x + w, y + h, r);  
+            this.arcTo(x + w, y + h, x, y + h, r); this.arcTo(x, y + h, x, y, r);  
+            this.arcTo(x, y, x + w, y, r); this.closePath();  
+            return this;  
+        };  
+    }  
+</script>  
+  
+</body>  
+</html>  
